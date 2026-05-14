@@ -1,424 +1,83 @@
-# Arquitetura de Segurança — Leaderboard do Jogo da Cobrinha
+# Security Architecture — Snake Game Leaderboard
 
-# Objetivo
+Este documento detalha as medidas de segurança implementadas para garantir a integridade do sistema de classificação (leaderboard), protegendo-o contra manipulações de pontuação, ataques de injeção e abusos de automação.
 
-O sistema de leaderboard foi projetado para impedir:
+## 1. Visão Geral da Estratégia de Defesa
+A arquitetura adota o princípio de **Defesa em Profundidade (Defense in Depth)**, onde falhas numa camada de controlo são mitigadas por camadas subsequentes. O sistema transita de um modelo de "confiança no cliente" para um modelo de **Validação Defensiva Estrita**.
 
-- manipulação trivial de score
-- spam automatizado
-- spoofing visual
-- payloads maliciosos
-- corrupção do estado frontend
-- abuso básico via DevTools
-- ataques simples de script kiddies
+### Fluxo de Validação de Dados
+1.  **Ingress:** Sanitização e Normalização de Input (Frontend).
+2.  **Transport:** Validação de Schema e Tipagem (API).
+3.  **Processing:** Heurísticas Anti-Cheat e Rate Limiting (Backend).
+4.  **Egress:** Parsing Defensivo e Renderização Segura (Frontend).
 
-A arquitetura utiliza múltiplas camadas de validação e proteção tanto no frontend quanto no backend.
+
 
 ---
 
-# Fluxo Geral da Segurança
-
-```
-Usuário digita nome
-        ↓
-Sanitização do input
-        ↓
-Normalização unicode
-        ↓
-Validação do ID
-        ↓
-Jogo executa
-        ↓
-Score é enviado
-        ↓
-Backend valida payload
-        ↓
-Rate limit aplicado
-        ↓
-Anti-cheat heurístico
-        ↓
-Persistência do score
-        ↓
-Frontend faz parsing defensivo
-        ↓
-Renderização segura
-
-_____________________________________
-1. Sanitização do Nome do Jogador
-Como funciona
+## 2. Controles de Segurança de Input (Nome do Jogador)
 
-Toda entrada do usuário passa por:
+### Sanitização e Normalização
+Toda entrada de texto passa por um pipeline de limpeza antes de qualquer processamento:
+* **Normalização Unicode (NFKC):** Converte caracteres visualmente equivalentes (ex: `ＡＤＭＩＮ` para `ADMIN`) para evitar *spoofing* e ataques de homógrafos.
+* **Remoção de Caracteres Invisíveis/Bidi:** Elimina caracteres de controlo bidirecional e *zero-width spaces* que poderiam ser usados para burlar identidades ou manipular a ordem visual do texto.
+* **Allowlist Estrita:** Aplicação de Regex `/[^A-Za-zÀ-ÖØ-öø-ÿ0-9 _-]/g`. Apenas caracteres alfanuméricos, espaços, underscores e hífens são permitidos.
 
-sanitizePlayerNameInput()
-
-e depois:
-
-normalizePlayerName()
-
-O sistema:
+### Mitigações
+* **Stored XSS & HTML Injection:** O payload perde capacidade de execução ao ser sanitizado e limpo de tags.
+* **Visual Impersonation:** Impede que atacantes se passem por outros utilizadores usando caracteres especiais idênticos.
 
-remove caracteres perigosos
-remove caracteres invisíveis
-remove caracteres bidi
-normaliza unicode
-limita tamanho
-aplica trim
-padroniza uppercase
-Exemplo
+---
 
-´´´
-Entrada maliciosa:
+## 3. Integridade do ID e Estado
 
-<script>alert(1)</script>
+### Validação de Identificador
+O ID do jogador utiliza um charset restrito `[A-HJ-NP-Z2-9]{6}`.
+* **Exclusão de Caracteres Ambíguos:** Removidos `O, 0, I, 1` para prevenir confusão visual e ataques de engenharia social.
+* **Validação de Formato:** IDs que não seguem o tamanho fixo ou charset são rejeitados imediatamente.
 
-Resultado sanitizado:
+---
 
-SCRIPTALERT1SCRIPT
-´´´
+## 4. Mecanismos Anti-Cheat e Validação de Pontuação
 
-O payload perde completamente a capacidade de execução.
+### Regras de Negócio e Heurísticas
+Diferente de sistemas legados, o backend não aceita pontuações de forma passiva:
+* **Validação de Step:** O score deve ser múltiplo de 10 (regra do jogo). Valores como `777` são sumariamente rejeitados.
+* **Heurística de Tempo (Temporal Analysis):** O backend valida a relação `Score vs Duração da Partida`. Se um jogador atinge 500 pontos em 100ms, o sistema identifica como impossibilidade física e descarta o registro.
+* **Constraints de Range:** Definição estrita de valores mínimos (0) e máximos (5000) plausíveis.
 
-O que isso impede
-Stored XSS
-HTML injection
-Unicode spoofing
-Invisible character abuse
-Homoglyph attacks
-Bidi override attacks
-2. Allowlist de Caracteres
-Como funciona
+### Persistência Autoritativa
+* **Server-Side Cooldown:** O controlo de frequência de envio (cooldown) é validado no servidor. O bypass via limpeza de `localStorage` é ineficaz.
+* **Idempotência e Melhor Score:** O sistema mantém apenas a melhor pontuação por ID, prevenindo o *flooding* da base de dados com entradas redundantes.
 
-O sistema utiliza uma regex whitelist:
+---
 
-/[^A-Za-zÀ-ÖØ-öø-ÿ0-9 _-]/g
+## 5. Segurança de Infraestrutura e API
 
-Isso significa:
+### Rate Limiting
+Implementação de limites de requisições baseados em:
+* **IP Source:** Previne ataques de negação de serviço (DoS) e brute force.
+* **Player ID:** Impede que um único utilizador automatize o envio de milhares de scores através de scripts.
 
-apenas caracteres explicitamente permitidos passam.
+### Parsing Defensivo (Frontend)
+O frontend trata a resposta da API como **não confiável**.
+* **Schema Validation:** O método `parseScoresApiResponse()` valida se cada objeto da lista contém os tipos e formatos esperados antes de atualizar o estado do React.
+* **Type Safety em Runtime:** O uso de TypeScript é reforçado por validações explícitas, prevenindo *Type Confusion* ou quebras de estado por JSON malformado.
 
-Caracteres permitidos
-letras
-números
-espaço
-underline
-hífen
+---
 
-Todo o resto é removido.
+## 6. Matriz de Mitigação de Riscos
 
-O que isso impede
-payloads HTML
-caracteres especiais maliciosos
-obfuscação de payload
-unicode perigoso
-3. Normalização Unicode
-Como funciona
-
-O sistema usa:
-
-normalize("NFKC")
-
-para transformar caracteres unicode visualmente equivalentes em uma forma padronizada.
+| Ameaça | Técnica de Mitigação | Status |
+| :--- | :--- | :--- |
+| **Stored XSS** | Sanitização de Input + React Escaping | Protegido |
+| **Score Forgery** | Validação de Step + Heurística Temporal | Mitigado |
+| **Unicode Spoofing** | Normalização NFKC | Protegido |
+| **Bidi Attacks** | Remoção de caracteres de controlo | Protegido |
+| **API Spam** | Rate Limiting + Cooldown Server-side | Mitigado |
+| **State Poisoning** | Parsing Defensivo de API | Protegido |
 
-Exemplo
-ＡＤＭＩＮ
-
-vira:
+---
 
-ADMIN
-O que isso impede
-spoofing visual
-usernames falsificados
-ataques com homoglyphs unicode
-4. Remoção de Caracteres Invisíveis
-Como funciona
-
-O sistema remove:
-
-zero-width chars
-invisible unicode chars
-unicode formatting chars
-Exemplo
-
-Isso:
-
-A​D​M​I​N
-
-vira:
-
-ADMIN
-O que isso impede
-usernames invisivelmente alterados
-bypass visual
-impersonação
-5. Remoção de Caracteres Bidirecionais
-Como funciona
-
-Caracteres bidi são removidos:
-
-BIDI_CHARS_REGEX
-Exemplo de ataque
-
-Um atacante poderia tentar:
-
-abcexe.jpg
-
-para parecer:
-
-abcjpg.exe
-O que isso impede
-manipulação visual
-engenharia social textual
-disfarce de conteúdo
-6. Validação do ID do Jogador
-Como funciona
-
-O ID possui:
-
-tamanho fixo
-charset restrito
-regex própria
-Formato permitido
-[A-HJ-NP-Z2-9]{6}
-Caracteres removidos
-
-O sistema remove:
-
-O
-0
-I
-1
-
-para evitar confusão visual.
-
-O que isso impede
-IDs falsificados visualmente
-spoofing de jogador
-payload injection em IDs
-7. Validação do Score
-Como funciona
-
-O backend valida:
-
-tipo numérico
-integer
-range mínimo
-range máximo
-múltiplos válidos
-Regras
-mínimo: 0
-máximo: 5000
-step: 10
-Exemplo inválido
-{
-  "score": 777
-}
-
-O score é rejeitado porque o jogo só gera múltiplos de 10.
-
-O que isso impede
-score forging
-manipulação trivial de ranking
-valores impossíveis
-8. Anti-Cheat por Tempo de Partida
-Como funciona
-
-O cliente envia:
-
-{
-  "score": 300,
-  "durationMs": 8000
-}
-
-O backend calcula:
-
-quantidade de comidas
-tempo mínimo plausível
-
-Se o tempo for impossível:
-
-o score é rejeitado
-Exemplo
-{
-  "score": 500,
-  "durationMs": 100
-}
-
-Isso é detectado como impossível.
-
-O que isso impede
-cheats triviais
-score injection automatizado
-payloads absurdos
-9. Rate Limiting
-Como funciona
-
-O backend aplica limite por:
-
-IP
-ID do jogador
-
-Quando excedido:
-
-429 Too Many Requests
-O que isso impede
-flood
-spam
-brute force de ranking
-automação simples
-10. Cooldown Server-Side
-Antes
-
-O cooldown existia apenas no localStorage.
-
-Isso podia ser burlado via DevTools.
-
-Agora
-
-O backend valida o cooldown.
-
-Mesmo apagando localStorage:
-
-o servidor ainda bloqueia.
-O que isso impede
-bypass trivial
-spam manual
-manipulação client-side
-11. Best Score Only
-Como funciona
-
-O sistema mantém:
-
-apenas a melhor pontuação do jogador
-O que isso impede
-flood do ranking
-múltiplas entradas do mesmo usuário
-poluição visual do leaderboard
-12. Parsing Defensivo da API
-Como funciona
-
-O frontend NÃO confia mais diretamente no JSON da API.
-
-Tudo passa por:
-
-parseScoresApiResponse()
-O que é validado
-
-Cada entrada precisa possuir:
-
-nome válido
-ID válido
-score válido
-
-Entradas inválidas:
-
-são descartadas
-O que isso impede
-crashes
-state poisoning
-payloads malformados
-corrupção do React state
-13. Runtime Validation
-Como funciona
-
-O sistema valida:
-
-tipos
-estrutura
-ranges
-formatos
-
-em runtime.
-
-Importante
-
-TypeScript sozinho NÃO protege runtime.
-
-O backend agora valida tudo explicitamente.
-
-O que isso impede
-malformed JSON
-type confusion
-object injection
-14. Defense in Depth
-Como funciona
-
-A validação ocorre em múltiplas camadas:
-
-input
-modal
-game
-API
-parsing
-renderização
-Objetivo
-
-Mesmo que uma camada falhe:
-
-outra camada bloqueia.
-15. Renderização Segura
-Como funciona
-
-O React renderiza:
-
-{entry.name}
-
-sem:
-
-dangerouslySetInnerHTML
-O que isso impede
-execução de HTML
-execução de JavaScript
-stored XSS
-Tipos de Ataques Mitigados
-Ataque	Status
-Stored XSS	Mitigado
-HTML Injection	Mitigado
-Unicode Spoofing	Mitigado
-Homoglyph Attack	Mitigado
-Invisible Character Abuse	Mitigado
-Bidi Override Attack	Mitigado
-Score Forgery	Mitigado
-Leaderboard Flooding	Mitigado
-Spam Automatizado	Mitigado
-DevTools Cooldown Bypass	Mitigado
-Malformed JSON Abuse	Mitigado
-State Poisoning	Mitigado
-Rank Pollution	Mitigado
-Script Kiddie Abuse	Fortemente reduzido
-Limitações
-
-O sistema ainda é client-side em parte.
-
-Um atacante avançado ainda poderia:
-
-reproduzir requests válidos
-automatizar payloads plausíveis
-estudar heurísticas
-simular partidas
-
-Porém agora ele precisa:
-
-entender toda a lógica
-reproduzir validações
-respeitar limites
-contornar heurísticas
-automatizar payloads legítimos
-
-Isso aumenta drasticamente o custo do ataque.
-
-Resultado Final
-
-O projeto saiu de um modelo baseado em:
-
-confiança total no cliente
-
-para uma arquitetura baseada em:
-
-validação defensiva
-runtime validation
-trust boundaries
-anti-abuse
-parsing seguro
-sanitização consistente
-heurísticas anti-cheat
-defesa em profundidade
+## 7. Limitações Conhecidas
+Embora a superfície de ataque tenha sido drasticamente reduzida, este sistema opera sob um modelo de execução client-side. Um atacante sofisticado que realize engenharia reversa do binário/script e emule perfeitamente o comportamento humano (respeitando tempos de resposta e protocolos) ainda representa um risco residual. O foco desta arquitetura é eliminar abusos triviais e automatizações em escala.
